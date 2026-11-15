@@ -1,0 +1,5 @@
+__pycache__/
+*.egg-info/
+data/
+docker/.env
+factorio_agent.toml

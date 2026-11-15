@@ -1,10 +1,11 @@
-
+# Monitoring stack (design section 3). Ollama and the Python agent run natively on Windows.
+# Ports are bound to localhost only (design section 12).
 services:
-  wiretap-bridge:
+  wiretap:
     build:
       context: ./wiretap
       dockerfile: Dockerfile
-    container_name: wiretap-bridge
+    container_name: wiretap
     restart: unless-stopped
     command:
       - python
@@ -20,33 +21,29 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
     restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:
-      - wiretap-bridge
+      - wiretap
     networks:
       - monitoring
 
   grafana:
     image: grafana/grafana:latest
-    container_name: grafana
     restart: unless-stopped
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-now}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
-      - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
@@ -54,10 +51,10 @@ services:
     networks:
       - monitoring
 
-volumes:
-  prometheus-data:
-  grafana-data:
-
 networks:
   monitoring:
     driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

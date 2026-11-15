@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/factorio-llm.iml" filepath="$PROJECT_DIR$/.idea/factorio-llm.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/factorio-agent.iml" filepath="$PROJECT_DIR$/.idea/factorio-agent.iml" />
     </modules>
   </component>
 </project>

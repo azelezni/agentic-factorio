@@ -1,0 +1,766 @@
+# Factorio AI Agent — Technical Design Document
+
+**Status:** Proposed  
+**Version:** 1.0  
+**Date:** November 15, 2026  
+**Target game version:** Factorio 2.1
+
+---
+
+## 1. Overview
+
+### 1.1 Purpose
+
+Build a locally hosted AI agent that monitors a Factorio factory, identifies production problems, investigates their causes, and provides actionable recommendations.
+
+The agent will combine deterministic monitoring and time-series analysis with a locally hosted Large Language Model (LLM).
+
+The goal is not simply to create a chatbot that knows about Factorio. It is to build an observability and troubleshooting system that understands the actual state and historical behavior of the player's factory.
+
+### 1.2 Primary objectives
+
+- Monitor factory production and consumption continuously.
+- Detect anomalies such as production drops, resource shortages, and stalled production chains.
+- Investigate anomalies using historical metrics and relationships between production entities.
+- Explain findings in natural language.
+- Provide actionable recommendations based on collected telemetry.
+- Support interactive, on-demand investigations through a CLI.
+- Run locally without depending on external AI services.
+
+### 1.3 Non-goals for the initial implementation
+
+- Automatically modifying the factory.
+- Controlling the game through keyboard, mouse, or console commands.
+- Replacing Grafana as the primary visualization platform.
+- Running an LLM continuously as part of the monitoring loop.
+- Building a general-purpose autonomous AI framework.
+
+The initial agent will be strictly read-only.
+
+---
+
+## 2. Architecture
+
+### 2.1 High-level architecture
+
+The architecture consists of four main layers:
+
+1. **Data collection:** Extract factory telemetry from Factorio.
+2. **Metrics storage:** Expose and store telemetry as Prometheus time series.
+3. **Agent:** Detect anomalies, investigate metrics, and reason about findings.
+4. **Interface:** Provide CLI interaction and human-readable reports.
+
+```mermaid
+flowchart TB
+    subgraph Game["Factorio"]
+        MOD["Hmph Wiretap Mod"]
+        JSON["stats.json"]
+        MOD --> JSON
+    end
+
+    subgraph Monitoring["Docker Monitoring Stack"]
+        BRIDGE["Wiretap Bridge"]
+        PROM["Prometheus"]
+        GRAFANA["Grafana"]
+        JSON --> BRIDGE
+        BRIDGE --> PROM
+        PROM --> GRAFANA
+    end
+
+    subgraph Agent["Python Agent - Windows"]
+        CLI["CLI"]
+        MON["Monitoring Engine"]
+        DET["Anomaly Detection"]
+        INVEST["Investigation Engine"]
+        TOOLS["Prometheus Query Tools"]
+        OLLAMA["Ollama Client"]
+        CLI --> INVEST
+        MON --> DET
+        DET --> INVEST
+        INVEST --> TOOLS
+        TOOLS --> PROM
+        INVEST --> OLLAMA
+    end
+
+    subgraph LLM["Local Inference"]
+        QWEN["Qwen3 8B"]
+        OLLAMA --> QWEN
+    end
+
+    INVEST --> REPORT["Investigation Report"]
+    CLI --> MON
+```
+
+### 2.2 Technology choices
+
+| Component | Technology | Responsibility |
+|---|---|---|
+| Game telemetry | Hmph Wiretap | Extract factory statistics |
+| Telemetry bridge | Wiretap companion Python bridge | Expose metrics |
+| Metrics collection | Prometheus | Scrape and retain time series |
+| Visualization | Grafana | Dashboards and historical analysis |
+| Agent runtime | Python 3 | Orchestration and business logic |
+| LLM runtime | Ollama | Local inference |
+| Initial model | Qwen3 8B | Reasoning and explanations |
+| Agent interface | CLI | User interaction |
+| Tool interface | Python functions initially | Structured access to telemetry |
+
+The first implementation will use direct Python functions for tools. MCP can be introduced later if external clients or additional agent integrations require it.
+
+---
+
+## 3. Runtime and deployment model
+
+The application will be split between Docker containers and native Windows processes.
+
+### Docker Desktop / WSL2
+
+- Wiretap bridge
+- Prometheus
+- Grafana
+
+### Native Windows
+
+- Ollama
+- Python agent
+- CLI
+
+This separation allows the agent to access Ollama through localhost while Prometheus remains accessible through its published localhost port.
+
+Initial service endpoints:
+
+| Service | Endpoint |
+|---|---|
+| Ollama | `http://localhost:11434` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
+| Wiretap bridge | `http://localhost:8787` |
+
+The agent will use Prometheus as its primary data source rather than reading the Wiretap JSON directly.
+
+This creates a clear separation between telemetry collection and analysis.
+
+---
+
+## 4. Agent responsibilities
+
+The agent will have two independent execution paths.
+
+### 4.1 Continuous monitoring
+
+Continuous monitoring must be deterministic, inexpensive, and independent of LLM availability.
+
+The monitoring engine will:
+
+1. Query relevant metrics from Prometheus.
+2. Evaluate configured health rules.
+3. Compare current values against historical baselines.
+4. Identify anomalies.
+5. Deduplicate repeated alerts.
+6. Trigger an investigation when an anomaly is detected.
+7. Report findings to the console.
+
+The monitoring engine should run every 60 seconds initially.
+
+The LLM must not be invoked for every monitoring cycle. It should only be called when an investigation is required.
+
+### 4.2 On-demand investigation
+
+Users should be able to request investigations directly through the CLI.
+
+Examples:
+
+- Why is electronic circuit production dropping?
+- Which resources are limiting production?
+- What happened to iron plate production during the last hour?
+- Are any production chains currently stalled?
+- Explain the factory's biggest bottleneck.
+
+The investigation engine will:
+
+1. Interpret the request.
+2. Determine which metrics are relevant.
+3. Query Prometheus.
+4. Retrieve historical context.
+5. Correlate relevant production and consumption metrics.
+6. Construct a structured evidence package.
+7. Ask the LLM to analyze the evidence.
+8. Return a report with findings and recommendations.
+
+The LLM must distinguish measured facts from hypotheses.
+
+---
+
+## 5. Anomaly detection
+
+### 5.1 Design principles
+
+Anomaly detection should initially rely on deterministic rules rather than LLM-based monitoring.
+
+Benefits:
+
+- Predictable behavior.
+- Lower resource consumption.
+- No inference latency in the monitoring loop.
+- Easier testing.
+- Reproducible results.
+
+### 5.2 Initial anomaly types
+
+| Anomaly | Detection approach |
+|---|---|
+| Production drop | Output rate falls below a configured threshold |
+| Production stopped | Output remains zero over a configured interval |
+| Resource shortage | Consumption exceeds available production |
+| Consumption drop | Input consumption suddenly decreases |
+| Unstable production | Significant variation in output rate |
+| Throughput degradation | Current output falls below historical baseline |
+
+### 5.3 Historical baselines
+
+The agent should compare current production against historical values.
+
+For example:
+
+- Current production: last 5 minutes.
+- Short-term baseline: last 30 minutes.
+- Long-term baseline: last 2 hours.
+
+A production anomaly might be identified when output drops by more than 30% compared with the previous baseline.
+
+These values should be configurable rather than hardcoded.
+
+### 5.4 Alert lifecycle
+
+Anomalies should have a lifecycle:
+
+- `DETECTED`
+- `INVESTIGATING`
+- `ACTIVE`
+- `RESOLVED`
+
+The system should avoid repeatedly investigating the same active anomaly every 60 seconds.
+
+An investigation should be triggered again only when there is a meaningful change or a configured re-investigation interval has elapsed.
+
+---
+
+## 6. Investigation engine
+
+The investigation engine is the central intelligence component of the application.
+
+### 6.1 Investigation workflow
+
+For each investigation:
+
+1. Identify the affected product or production metric.
+2. Query its recent production rate.
+3. Compare it with historical production.
+4. Identify related input resources.
+5. Compare input availability and consumption.
+6. Identify potentially affected upstream or downstream products.
+7. Determine whether the issue is isolated or part of a larger production problem.
+8. Generate a structured evidence summary.
+9. Send the evidence to Ollama.
+10. Produce a human-readable report.
+
+### 6.2 Example
+
+Suppose electronic circuit production drops by 40%.
+
+The investigation engine should inspect:
+
+- Electronic circuit production rate.
+- Copper plate consumption.
+- Iron plate consumption.
+- Copper plate production.
+- Iron plate production.
+- Other products competing for the same resources.
+- Historical production rates.
+
+Possible findings:
+
+- Copper plate production has dropped by 50%.
+- Copper plate consumption remains high.
+- Other copper-consuming production lines are also affected.
+
+The agent could conclude that copper plate production is a likely upstream bottleneck.
+
+It should explain which metrics support that conclusion and identify what additional evidence would be needed to confirm the physical cause.
+
+### 6.3 Evidence-based reasoning
+
+The LLM must not invent metrics or claim that a particular machine is malfunctioning unless the telemetry supports that conclusion.
+
+Investigation results should distinguish:
+
+- **Observed:** Directly measured facts.
+- **Inferred:** Conclusions supported by multiple observations.
+- **Hypothesis:** Plausible explanations that require additional data.
+- **Recommendation:** Suggested actions for the player.
+
+---
+
+## 7. Prometheus integration
+
+The agent will interact with Prometheus through a dedicated query layer.
+
+### 7.1 Initial query capabilities
+
+The query layer should support:
+
+- Instant queries.
+- Range queries.
+- Metric discovery.
+- Label discovery.
+- Query result normalization.
+
+The initial implementation should expose a small number of reusable Python functions instead of allowing arbitrary LLM-generated HTTP requests.
+
+### 7.2 Proposed tool interface
+
+```python
+query_instant(
+    query: str,
+    timestamp: str | None = None
+)
+
+query_range(
+    query: str,
+    start: str,
+    end: str,
+    step: str
+)
+
+list_metrics()
+
+get_metric_labels(
+    metric_name: str
+)
+```
+
+These functions will form the foundation of the future MCP server.
+
+### 7.3 Metric discovery
+
+The agent should not assume metric names before inspecting the actual exporter output.
+
+During initialization, it should discover available metrics and build a metric catalog.
+
+The catalog should contain:
+
+- Metric name.
+- Help text, when available.
+- Metric type, when available.
+- Available labels.
+- Relevant product or resource associations.
+
+This is important because the exact metric schema depends on the Wiretap bridge implementation.
+
+---
+
+## 8. Ollama integration
+
+### 8.1 Runtime
+
+Ollama will run natively on Windows.
+
+Initial configuration:
+
+| Setting | Value |
+|---|---|
+| Model | `qwen3:8b` |
+| API | `http://localhost:11434` |
+| Context window | 8192 tokens initially |
+| Keep-alive | 5 minutes |
+| Concurrent inference | 1 initially |
+
+The RTX 4070 SUPER has 12 GB VRAM. The initial model and context settings should be validated with actual GPU utilization and inference performance.
+
+### 8.2 LLM responsibilities
+
+The LLM is responsible for:
+
+- Understanding natural-language requests.
+- Interpreting structured investigation evidence.
+- Identifying likely relationships between observations.
+- Explaining production problems.
+- Generating recommendations.
+- Summarizing monitoring findings.
+
+It is not responsible for:
+
+- Collecting telemetry.
+- Calculating authoritative production rates.
+- Maintaining monitoring schedules.
+- Detecting every anomaly.
+- Storing historical metrics.
+- Making unverified claims about the factory.
+
+### 8.3 Model abstraction
+
+The Ollama client should be isolated behind a small interface.
+
+This will allow changing models without modifying the investigation engine.
+
+For example:
+
+```python
+class LLMClient:
+    def generate(self, messages: list[dict]) -> str:
+        ...
+```
+
+The initial implementation can use Ollama's `/api/chat` endpoint directly without introducing LangChain or another agent framework.
+
+---
+
+## 9. CLI interface
+
+The CLI will be the primary interface for the initial version.
+
+Proposed commands:
+
+| Command | Description |
+|---|---|
+| `python -m factorio_agent chat` | Interactive conversation |
+| `python -m factorio_agent status` | Show agent and data-source health |
+| `python -m factorio_agent monitor` | Start continuous monitoring |
+| `python -m factorio_agent investigate --window 1h` | Investigate recent factory behavior |
+| `python -m factorio_agent investigate --item electronic-circuit` | Investigate a specific product |
+
+### 9.1 Example monitoring output
+
+```text
+[12:00:00] Monitoring started.
+
+[12:01:00] Factory metrics collected.
+[12:02:00] Factory metrics collected.
+
+[12:03:00] ANOMALY DETECTED
+Product: Electronic Circuits
+Production change: -42%
+Baseline: 120/min
+Current: 69/min
+
+[12:03:01] Starting investigation...
+
+[12:03:12] Investigation complete.
+
+Likely bottleneck: Copper plate production
+Confidence: Medium
+
+Evidence:
+- Copper plate production decreased by 51%.
+- Copper plate consumption remains stable.
+- Electronic circuit production decreased by 42%.
+
+Recommendation:
+Investigate copper plate smelting capacity and copper ore supply.
+```
+
+### 9.2 Example on-demand interaction
+
+```text
+> Why is electronic circuit production dropping?
+
+Investigating electronic circuit production...
+
+Analysis:
+Electronic circuit production decreased by 42% over
+the last 15 minutes.
+
+Copper plate production decreased by 51%, while
+copper consumption remained relatively stable.
+
+This suggests that copper plate availability is
+the most likely upstream bottleneck.
+
+Recommended action:
+Inspect copper ore supply and copper smelting throughput.
+```
+
+---
+
+## 10. Project structure
+
+Proposed repository structure:
+
+```text
+factorio-llm/
+│
+├── agent.py
+├── pyproject.toml
+├── README.md
+│
+├── docker/
+│   ├── docker-compose.yml
+│   ├── .env
+│   ├── wiretap/
+│   │   └── Dockerfile
+│   ├── prometheus/
+│   │   └── prometheus.yml
+│   └── grafana/
+│       └── provisioning/
+│
+├── src/
+│   └── factorio_agent/
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── config.py
+│       │
+│       ├── cli/
+│       │   └── commands.py
+│       │
+│       ├── llm/
+│       │   ├── client.py
+│       │   └── prompts.py
+│       │
+│       ├── monitoring/
+│       │   ├── engine.py
+│       │   ├── rules.py
+│       │   └── alert_manager.py
+│       │
+│       ├── investigation/
+│       │   ├── engine.py
+│       │   ├── evidence.py
+│       │   └── report.py
+│       │
+│       ├── tools/
+│       │   └── prometheus.py
+│       │
+│       └── models/
+│           ├── metrics.py
+│           └── anomalies.py
+│
+└── tests/
+    ├── test_llm_client.py
+    ├── test_prometheus.py
+    ├── test_anomaly_detection.py
+    └── test_investigation.py
+```
+
+The initial `agent.py` prototype can remain temporarily as a smoke test, but should eventually be replaced by the package entry point.
+
+---
+
+## 11. Reliability and failure handling
+
+The agent must tolerate individual component failures.
+
+| Failure | Expected behavior |
+|---|---|
+| Ollama unavailable | Monitoring continues; investigations report inference unavailable |
+| Prometheus unavailable | Skip data-dependent operations and report the failure |
+| Wiretap bridge unavailable | Detect missing telemetry and avoid interpreting it as zero production |
+| Missing metric | Report unsupported or unavailable metric |
+| Malformed LLM response | Retry or return a controlled error |
+| LLM timeout | Preserve monitoring state and allow another investigation attempt |
+| Agent restart | Resume monitoring without duplicating all active alerts |
+
+Missing data must never be interpreted as zero production.
+
+The monitoring engine should distinguish between:
+
+- A valid zero value.
+- A missing time series.
+- A stale metric.
+- A failed Prometheus query.
+
+---
+
+## 12. Security and operational considerations
+
+- The agent should initially have read-only access to Prometheus.
+- The LLM must not execute arbitrary shell commands.
+- No automatic factory modifications.
+- No arbitrary code execution based on model output.
+- Keep local service endpoints bound to localhost where practical.
+- Do not expose Ollama or Grafana publicly without authentication and appropriate network controls.
+- Apply timeouts and response-size limits to external service calls.
+- Log investigations and their supporting evidence.
+- Keep API credentials and configuration outside source control.
+
+---
+
+## 13. Testing strategy
+
+Testing will be introduced alongside each component.
+
+### Unit tests
+
+- Ollama request and response handling.
+- Prometheus query parsing.
+- Metric normalization.
+- Anomaly detection rules.
+- Alert deduplication.
+- Evidence generation.
+- Investigation report formatting.
+
+### Integration tests
+
+- Python agent connects to Ollama.
+- Python agent queries Prometheus.
+- Prometheus returns actual Wiretap metrics.
+- Agent identifies a deliberately simulated production drop.
+- Investigation output includes the relevant evidence.
+
+### End-to-end acceptance test
+
+A successful end-to-end test should demonstrate:
+
+1. Factorio produces telemetry.
+2. Wiretap bridge exposes the telemetry.
+3. Prometheus stores the metrics.
+4. Agent detects an abnormal production change.
+5. Agent queries relevant historical metrics.
+6. Ollama analyzes the evidence.
+7. The CLI displays a useful investigation report.
+
+---
+
+## 14. Implementation roadmap
+
+The project will be developed incrementally. Each phase should produce a working and testable result.
+
+### Phase 1 — Basic Ollama client
+
+**Goal:** Verify local inference.
+
+- Create the Python project.
+- Implement the Ollama HTTP client.
+- Implement interactive CLI conversation.
+- Maintain conversation history.
+- Add basic error handling.
+
+**Acceptance criteria:**
+- Python connects to local Ollama.
+- Qwen3 generates responses.
+- Conversation history works.
+- GPU inference is verified.
+
+### Phase 2 — Prometheus integration
+
+**Goal:** Give the agent access to real factory telemetry.
+
+- Implement Prometheus HTTP client.
+- Discover available metrics.
+- Normalize query results.
+- Add basic CLI metric queries.
+- Validate metric names and labels against the actual Wiretap output.
+
+**Acceptance criteria:**
+- Agent can query real factory metrics.
+- Agent can retrieve historical time-series data.
+- Missing and stale metrics are handled correctly.
+
+### Phase 3 — First investigation
+
+**Goal:** Investigate a specific production problem.
+
+- Implement investigation engine.
+- Add product-specific metric queries.
+- Build structured evidence packages.
+- Integrate the evidence with Ollama.
+- Generate investigation reports.
+
+**Acceptance criteria:**
+- User can investigate a specific product.
+- Agent explains production trends using actual metrics.
+- Findings reference supporting observations.
+
+### Phase 4 — Continuous monitoring
+
+**Goal:** Detect production problems automatically.
+
+- Implement monitoring loop.
+- Add configurable anomaly rules.
+- Add alert lifecycle and deduplication.
+- Trigger investigations automatically.
+- Display results in the console.
+
+**Acceptance criteria:**
+- Monitoring runs independently of the LLM.
+- Anomalies are detected deterministically.
+- LLM investigations are triggered only when needed.
+
+### Phase 5 — Advanced investigations
+
+**Goal:** Understand interconnected production bottlenecks.
+
+- Model production and consumption relationships.
+- Correlate upstream and downstream products.
+- Identify resource competition.
+- Improve historical baseline analysis.
+- Improve confidence assessment.
+
+**Acceptance criteria:**
+- Agent can identify likely upstream causes.
+- Reports distinguish evidence from hypotheses.
+- Recommendations are relevant to the observed problem.
+
+### Phase 6 — MCP integration
+
+**Goal:** Make the agent's capabilities reusable by external AI clients.
+
+- Expose Prometheus query functions through MCP.
+- Expose investigation capabilities through MCP.
+- Add tool schemas and validation.
+- Support external MCP clients where useful.
+
+**Acceptance criteria:**
+- MCP clients can access the same read-only capabilities.
+- Existing CLI functionality remains intact.
+
+---
+
+## 15. Key architectural decisions
+
+| Decision | Rationale |
+|---|---|
+| Local Ollama inference | Privacy, independence from external APIs, predictable availability |
+| Deterministic monitoring | Low overhead and reproducible detection |
+| LLM only for investigations | Avoid unnecessary inference and resource consumption |
+| Prometheus as the data source | Historical metrics and a standard query interface |
+| Python orchestration | Simple integration with Ollama and Prometheus |
+| Direct Python tools initially | Avoid unnecessary framework complexity |
+| Read-only agent | Safety and simpler initial implementation |
+| CLI first | Fast development and easy debugging |
+| MCP later | Keep the initial architecture small while preserving extensibility |
+
+---
+
+## 16. Open questions and future improvements
+
+The following questions should be resolved as the project develops:
+
+1. **Metric semantics:** Which exact metrics and labels does the Wiretap bridge expose?
+2. **Production modeling:** Does the available telemetry expose enough information to distinguish machine throughput from aggregate item production?
+3. **Resource relationships:** How should the agent model recipes, intermediate products, and competing consumers?
+4. **Historical retention:** Is 30 days of Prometheus retention sufficient?
+5. **Anomaly sensitivity:** How should thresholds adapt to different factory sizes and production patterns?
+6. **State persistence:** Should active alerts and investigation history be stored in SQLite?
+7. **Model selection:** Does Qwen3 8B provide sufficiently accurate analysis, or would a larger model materially improve investigations?
+8. **Reporting:** Should investigation reports eventually be exported to Markdown or integrated into Grafana?
+
+---
+
+## 17. Definition of success
+
+The project will be considered successful when a player can ask:
+
+**"Why has my electronic circuit production dropped?"**
+
+And the agent can:
+
+- Retrieve actual factory telemetry.
+- Identify when the production drop started.
+- Compare current production against historical values.
+- Inspect upstream resource production and consumption.
+- Identify the most likely bottleneck.
+- Explain the evidence supporting its conclusion.
+- Suggest practical corrective actions.
+
+The central design principle is:
+
+**Deterministic systems collect and validate the facts. The LLM reasons about those facts and explains them to the user.**
